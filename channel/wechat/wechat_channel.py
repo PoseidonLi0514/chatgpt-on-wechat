@@ -118,36 +118,42 @@ class WechatChannel(ChatChannel):
     def startup(self):
         try:
             time.sleep(3)
-            logger.error("""[WechatChannel] 当前channel暂不可用，目前支持的channel有:
-                1. terminal: 终端
-                2. wechatmp: 个人公众号
-                3. wechatmp_service: 企业公众号
-                4. wechatcom_app: 企微自建应用
-                5. dingtalk: 钉钉
-                6. feishu: 飞书
-                7. web: 网页
-                8. wcf: wechat (需Windows环境，参考 https://github.com/zhayujie/chatgpt-on-wechat/pull/2562 )
-            可修改 config.json 配置文件的 channel_type 字段进行切换""")
+            logger.warning(
+                "[WechatChannel] 准备启动 wx 通道（基于 itchat/webwx，可能因微信风控/协议变更导致不可用；更稳定的方案通常是 web/wechatmp/wechatcom_app/wcf 等）。"
+            )
 
-            # itchat.instance.receivingRetryCount = 600  # 修改断线超时时间
-            # # login by scan QRCode
-            # hotReload = conf().get("hot_reload", False)
-            # status_path = os.path.join(get_appdata_dir(), "itchat.pkl")
-            # itchat.auto_login(
-            #     enableCmdQR=2,
-            #     hotReload=hotReload,
-            #     statusStorageDir=status_path,
-            #     qrCallback=qrCallback,
-            #     exitCallback=self.exitCallback,
-            #     loginCallback=self.loginCallback
-            # )
-            # self.user_id = itchat.instance.storageClass.userName
-            # self.name = itchat.instance.storageClass.nickName
-            # logger.info("Wechat login success, user_id: {}, nickname: {}".format(self.user_id, self.name))
-            # # start message listener
-            # itchat.run()
+            itchat.instance.receivingRetryCount = 600  # 修改断线超时时间
+            # login by scan QRCode
+            hotReload = conf().get("hot_reload", False)
+            status_path = os.path.join(get_appdata_dir(), "itchat.pkl")
+            itchat.auto_login(
+                enableCmdQR=2,
+                hotReload=hotReload,
+                statusStorageDir=status_path,
+                qrCallback=qrCallback,
+                exitCallback=self.exitCallback,
+                loginCallback=self.loginCallback,
+            )
+            self.user_id = itchat.instance.storageClass.userName
+            self.name = itchat.instance.storageClass.nickName
+            logger.info("Wechat login success, user_id: {}, nickname: {}".format(self.user_id, self.name))
+            # start message listener
+            itchat.run()
         except Exception as e:
+            logger.error(
+                """[WechatChannel] wx 通道启动失败。当前支持的 channel_type 包含:
+    1. terminal: 终端
+    2. wechatmp: 个人公众号
+    3. wechatmp_service: 企业公众号
+    4. wechatcom_app: 企微自建应用
+    5. dingtalk: 钉钉
+    6. feishu: 飞书
+    7. web: 网页
+    8. wcf: wechat (需Windows环境，参考 https://github.com/zhayujie/chatgpt-on-wechat/pull/2562 )
+可修改 config.json 配置文件的 channel_type 字段进行切换"""
+            )
             logger.exception(e)
+            raise
 
     def exitCallback(self):
         try:
@@ -306,4 +312,3 @@ def _send_qr_code(qrcode_list: list):
             chat_client.send_qrcode(qrcode_list)
     except Exception as e:
         pass
-

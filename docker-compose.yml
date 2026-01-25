@@ -1,0 +1,11 @@
+version: '2.0'
+services:
+  chatgpt-on-wechat:
+    image: zhayujie/chatgpt-on-wechat
+    container_name: chatgpt-on-wechat
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./channel/wechat/wechat_channel.py:/app/channel/wechat/wechat_channel.py:ro
+      - ./plugins-config.json:/app/plugins/config.json:ro
