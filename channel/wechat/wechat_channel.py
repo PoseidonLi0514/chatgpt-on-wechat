@@ -28,6 +28,8 @@ from lib.itchat.content import *
 
 @itchat.msg_register([TEXT, VOICE, PICTURE, NOTE, ATTACHMENT, SHARING])
 def handler_single_msg(msg):
+    if _raw_should_ignore_itchat_msg(msg):
+        return None
     try:
         cmsg = WechatMessage(msg, False)
     except NotImplementedError as e:
@@ -39,6 +41,8 @@ def handler_single_msg(msg):
 
 @itchat.msg_register([TEXT, VOICE, PICTURE, NOTE, ATTACHMENT, SHARING], isGroupChat=True)
 def handler_group_msg(msg):
+    if _raw_should_ignore_itchat_msg(msg):
+        return None
     try:
         cmsg = WechatMessage(msg, True)
     except NotImplementedError as e:
@@ -52,7 +56,8 @@ def _check(func):
     def wrapper(self, cmsg: ChatMessage):
         msgId = cmsg.msg_id
         if msgId in self.receivedMsgs:
-            logger.info("Wechat message {} already received, ignore".format(msgId))
+            # hot_reload 场景下 itchat 可能会重复派发同一条消息，避免刷屏降级为 debug
+            logger.debug("Wechat message {} already received, ignore".format(msgId))
             return
         self.receivedMsgs[msgId] = True
         create_time = cmsg.create_time  # 消息时间戳
@@ -65,6 +70,29 @@ def _check(func):
         return func(self, cmsg)
 
     return wrapper
+
+
+_raw_received_msgs = ExpiredDict(600)  # 原始 itchat 消息去重，避免重复构造 WechatMessage 导致重启卡顿
+
+
+def _raw_should_ignore_itchat_msg(msg) -> bool:
+    """
+    itchat 在 hotReload/重连时可能重复派发消息，且会带回一批历史消息。
+    这里在构造 WechatMessage 之前做快速过滤，减少 CPU/IO 开销。
+    """
+    try:
+        msg_id = msg.get("MsgId")
+        if msg_id:
+            if msg_id in _raw_received_msgs:
+                return True
+            _raw_received_msgs[msg_id] = True
+        if conf().get("hot_reload") == True:
+            create_time = msg.get("CreateTime")
+            if create_time and int(create_time) < int(time.time()) - 60:
+                return True
+    except Exception as e:
+        logger.debug(f"[WX] raw msg ignore check failed: {e}")
+    return False
 
 
 # 可用的二维码生成接口
