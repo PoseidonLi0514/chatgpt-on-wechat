@@ -76,3 +76,47 @@ def remove_markdown_symbol(text: str):
     if not text:
         return text
     return re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+
+
+def extract_markdown_image_urls(text: str):
+    if not text:
+        return []
+    urls = []
+    for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", text):
+        inside = match.group(1).strip()
+        if inside.startswith("<") and ">" in inside:
+            inside = inside[1:inside.index(">")].strip()
+        else:
+            inside = inside.split()[0].strip().strip('"').strip("'")
+        if inside.startswith("http://") or inside.startswith("https://"):
+            urls.append(inside)
+    for match in re.finditer(r"<img[^>]+src=[\"']([^\"']+)[\"'][^>]*>", text, flags=re.IGNORECASE):
+        url = match.group(1).strip()
+        if url.startswith("http://") or url.startswith("https://"):
+            urls.append(url)
+    if urls:
+        return _unique_keep_order(urls)
+    return extract_https_urls(text)
+
+
+def extract_https_urls(text: str):
+    if not text:
+        return []
+    urls = []
+    for match in re.finditer(r"https?://[^\s<>()\[\]\"']+", text):
+        url = match.group(0).strip()
+        url = url.rstrip(".,;:!?)]}\"'")
+        if url.startswith("http://") or url.startswith("https://"):
+            urls.append(url)
+    return _unique_keep_order(urls)
+
+
+def _unique_keep_order(items):
+    seen = set()
+    result = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result

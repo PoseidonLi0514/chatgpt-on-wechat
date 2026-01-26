@@ -9,3 +9,4 @@ services:
       - ./config.json:/app/config.json:ro
       - ./channel/wechat/wechat_channel.py:/app/channel/wechat/wechat_channel.py:ro
       - ./plugins-config.json:/app/plugins/config.json:ro
+      - ./appdata:/app/appdata:rw
