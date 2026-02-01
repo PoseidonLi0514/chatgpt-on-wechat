@@ -145,6 +145,7 @@ pip3 install -r requirements-optional.txt
   "speech_recognition": false,                                # 是否开启语音识别
   "group_speech_recognition": false,                          # 是否开启群组语音识别
   "voice_reply_voice": false,                                 # 是否使用语音回复语音
+  "voice_reply_prefix": ["vo"],                               # 文本以该前缀开头时触发语音回复
   "character_desc": "你是基于大语言模型的AI智能助手，旨在回答并解决人们的任何问题，并且可以使用多种语言与人交流。",  # 系统提示词
   # 订阅欢迎语，公众号和企业微信channel中使用，当被订阅时会自动回复以下内容
   "subscribe_msg": "感谢您的关注！\n这里是AI智能助手，可以自由对话。\n支持语音对话。\n支持图片输入。\n支持图片输出，画字开头的消息将按要求创作图片。\n支持tool、角色扮演和文字冒险等丰富的插件。\n输入{trigger_prefix}#help 查看详细指令。",
@@ -179,6 +180,8 @@ pip3 install -r requirements-optional.txt
 + 添加 `"speech_recognition": true` 将开启语音识别，默认使用openai的whisper模型识别为文字，同时以文字回复，该参数仅支持私聊 (注意由于语音消息无法匹配前缀，一旦开启将对所有语音自动回复，支持语音触发画图)；
 + 添加 `"group_speech_recognition": true` 将开启群组语音识别，默认使用openai的whisper模型识别为文字，同时以文字回复，参数仅支持群聊 (会匹配group_chat_prefix和group_chat_keyword, 支持语音触发画图)；
 + 添加 `"voice_reply_voice": true` 将开启语音回复语音（同时作用于私聊和群聊）
++ 配置 `"voice_reply_prefix": ["vo"]` 可让**文本**以指定前缀触发语音回复，例如发送 `vo 你好`（适合“动作/心情/好感度”等多段输出场景）
++ 若要使用 DashScope 的 `qwen3-tts-flash` 做 TTS：配置 `"text_to_voice": "dashscope"`，并填写 `dashscope_api_key`（可选：`dashscope_tts_model/dashscope_tts_voice/dashscope_tts_language_type`）
 </details>
 
 <details>

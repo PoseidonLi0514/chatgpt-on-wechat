@@ -21,6 +21,10 @@ def create_voice(voice_type):
         from voice.openai.openai_voice import OpenaiVoice
 
         return OpenaiVoice()
+    elif voice_type == "dashscope":
+        from voice.dashscope.dashscope_voice import DashScopeVoice
+
+        return DashScopeVoice()
     elif voice_type == "pytts":
         from voice.pytts.pytts_voice import PyttsVoice
 

@@ -149,6 +149,13 @@ class ChatChannel(Channel):
                     logger.info("[chat_channel]receive single chat msg, but checkprefix didn't match")
                     return None
             content = content.strip()
+            voice_match_prefix = check_prefix(content, conf().get("voice_reply_prefix", ["vo"]))
+            if voice_match_prefix:
+                # 文本触发语音回复：用于“猫娘JSON”多段回复（动作 -> 语音 -> 心情/好感度）
+                context["catgirl_voice_mode"] = True
+                # 避免 always_reply_voice 等逻辑提前把整段文本转成语音，交给插件在发送阶段处理
+                context.setdefault("desire_rtype", ReplyType.TEXT)
+                content = content.replace(voice_match_prefix, "", 1).strip()
             img_match_prefix = check_prefix(content, conf().get("image_create_prefix",[""]))
             if img_match_prefix:
                 content = content.replace(img_match_prefix, "", 1)
