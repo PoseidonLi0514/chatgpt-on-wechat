@@ -95,6 +95,7 @@ available_setting = {
     "dashscope_tts_model": "qwen3-tts-flash",
     "dashscope_tts_voice": "Cherry",
     "dashscope_tts_language_type": "Auto",
+    "dashscope_tts_output_format": "mp3",  # dashscope tts 输出格式：mp3/wav（mp3更适合微信播放；不支持时会自动回退）
     # Google Gemini Api Key
     "gemini_api_key": "",
     # wework的通用配置

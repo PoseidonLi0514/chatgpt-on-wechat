@@ -9,7 +9,22 @@ import requests
 from bridge.reply import Reply, ReplyType
 from common.log import logger
 from config import conf
+from voice.audio_convert import any_to_mp3
 from voice.voice import Voice
+
+
+def _guess_audio_ext(headers: dict, content: bytes) -> str:
+    ctype = (headers.get("Content-Type") or headers.get("content-type") or "").lower().strip()
+    if "audio/mpeg" in ctype or "audio/mp3" in ctype:
+        return "mp3"
+    if "audio/wav" in ctype or "audio/x-wav" in ctype or "audio/wave" in ctype:
+        return "wav"
+    head = content[:16] if content else b""
+    if head.startswith(b"RIFF") and b"WAVE" in head:
+        return "wav"
+    if head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+        return "mp3"
+    return "wav"
 
 
 class DashScopeVoice(Voice):
@@ -65,12 +80,30 @@ class DashScopeVoice(Voice):
                 logger.error(f"[DashScopeVoice] download audio failed, status={audio_resp.status_code}, url={audio_url}")
                 return Reply(ReplyType.ERROR, "语音合成失败")
 
-            file_name = "tmp/" + datetime.datetime.now().strftime("%Y%m%d%H%M%S") + str(random.randint(0, 1000)) + ".wav"
-            with open(file_name, "wb") as f:
+            got_ext = _guess_audio_ext(audio_resp.headers or {}, audio_resp.content)
+            tmp_path = "tmp/" + datetime.datetime.now().strftime("%Y%m%d%H%M%S") + str(random.randint(0, 1000)) + f".{got_ext}"
+            with open(tmp_path, "wb") as f:
                 f.write(audio_resp.content)
-            logger.info(f"[DashScopeVoice] textToVoice success, file={file_name}, model={model}, voice={voice}")
-            return Reply(ReplyType.VOICE, file_name)
+
+            want_fmt = (conf().get("dashscope_tts_output_format") or "mp3").lower().strip()
+            if want_fmt == "mp3":
+                try:
+                    if tmp_path.endswith(".mp3"):
+                        logger.info(f"[DashScopeVoice] textToVoice success, file={tmp_path}, model={model}, voice={voice}")
+                        return Reply(ReplyType.VOICE, tmp_path)
+                    mp3_path = os.path.splitext(tmp_path)[0] + ".mp3"
+                    any_to_mp3(tmp_path, mp3_path)
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+                    logger.info(f"[DashScopeVoice] textToVoice success, file={mp3_path}, model={model}, voice={voice}")
+                    return Reply(ReplyType.VOICE, mp3_path)
+                except Exception as e:
+                    logger.warning("[DashScopeVoice] wav->mp3 convert failed, fallback to wav: %s" % e)
+
+            logger.info(f"[DashScopeVoice] textToVoice success, file={tmp_path}, model={model}, voice={voice}")
+            return Reply(ReplyType.VOICE, tmp_path)
         except Exception as e:
             logger.exception("[DashScopeVoice] textToVoice error: %s" % e)
             return Reply(ReplyType.ERROR, "遇到了一点小问题，请稍后再试")
-

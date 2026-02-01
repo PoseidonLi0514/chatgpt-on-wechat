@@ -182,6 +182,7 @@ pip3 install -r requirements-optional.txt
 + 添加 `"voice_reply_voice": true` 将开启语音回复语音（同时作用于私聊和群聊）
 + 配置 `"voice_reply_prefix": ["vo"]` 可让**文本**以指定前缀触发语音回复，例如发送 `vo 你好`（适合“动作/心情/好感度”等多段输出场景）
 + 若要使用 DashScope 的 `qwen3-tts-flash` 做 TTS：配置 `"text_to_voice": "dashscope"`，并填写 `dashscope_api_key`（可选：`dashscope_tts_model/dashscope_tts_voice/dashscope_tts_language_type`）
++ `dashscope_tts_output_format` 默认 `mp3`（更适合微信播放）；若环境缺少转码依赖会自动回退为 `wav`
 </details>
 
 <details>
