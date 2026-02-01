@@ -34,5 +34,6 @@ plugins/banwords/lib/__pycache__
 !plugins/keyword
 !plugins/linkai
 !plugins/agent
+!plugins/catgirl_json
 client_config.json
 plugins-config.json
