@@ -2,6 +2,7 @@
 
 import json
 import re
+import ast
 from typing import Optional, Dict
 
 import plugins
@@ -40,17 +41,66 @@ def _extract_json_object(text: str) -> str:
     return ""
 
 
+_RE_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
+_RE_PY_TRUE = re.compile(r"\bTrue\b")
+_RE_PY_FALSE = re.compile(r"\bFalse\b")
+_RE_PY_NONE = re.compile(r"\bNone\b")
+_RE_PLUS_NUMBER_VALUE = re.compile(r"(:\s*)\+(\d+(?:\.\d+)?)")
+
+
+def _sanitize_nonstandard_json(text: str) -> str:
+    """
+    兼容模型常见的“几乎是 JSON”的输出：
+    - 允许 `: +5` 这种前导 `+` 数字（标准 JSON 不允许），转成字符串 `\"+5\"` 保留符号
+    - 去掉 `}` / `]` 前的尾逗号
+    - 把 Python 风格的 True/False/None 转成 JSON 的 true/false/null
+    """
+    if not text:
+        return ""
+    s = text
+    s = _RE_PLUS_NUMBER_VALUE.sub(r'\1"+\2"', s)
+    s = _RE_TRAILING_COMMA.sub(r"\1", s)
+    s = _RE_PY_TRUE.sub("true", s)
+    s = _RE_PY_FALSE.sub("false", s)
+    s = _RE_PY_NONE.sub("null", s)
+    return s
+
+
+def _loads_relaxed_object(text: str):
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    sanitized = _sanitize_nonstandard_json(text)
+    if sanitized and sanitized != text:
+        try:
+            return json.loads(sanitized)
+        except Exception:
+            pass
+    # 最后兜底：兼容 Python dict 风格（单引号、+5 等），不执行任意代码
+    try:
+        return ast.literal_eval(text)
+    except Exception:
+        pass
+    if sanitized and sanitized != text:
+        try:
+            return ast.literal_eval(sanitized)
+        except Exception:
+            pass
+    return None
+
+
 def _parse_catgirl_payload(text: str) -> Optional[Dict]:
     s = _strip_code_fence(text)
-    try:
-        obj = json.loads(s)
-    except Exception:
+    obj = _loads_relaxed_object(s)
+    if obj is None:
         candidate = _extract_json_object(s)
         if not candidate:
             return None
-        try:
-            obj = json.loads(candidate)
-        except Exception:
+        obj = _loads_relaxed_object(candidate)
+        if obj is None:
             return None
     if not isinstance(obj, dict):
         return None
