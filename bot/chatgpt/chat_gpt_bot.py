@@ -5,7 +5,7 @@ import time
 import openai
 import openai.error
 import requests
-from common import const
+from common import const, utils
 from bot.bot import Bot
 from bot.chatgpt.chat_gpt_session import ChatGPTSession
 from bot.openai.open_ai_image import OpenAIImage
@@ -180,6 +180,7 @@ class AzureChatGPTBot(ChatGPTBot):
         self.args["deployment_id"] = conf().get("azure_deployment_id")
 
     def create_img(self, query, retry_count=0, api_key=None):
+        image_n, clean_query = utils.parse_image_n_from_prompt(query, default_n=1, min_n=1, max_n=4)
         text_to_image_model = conf().get("text_to_image")
         if text_to_image_model == "dall-e-2":
             api_version = "2023-06-01-preview"
@@ -191,7 +192,7 @@ class AzureChatGPTBot(ChatGPTBot):
             api_key = conf().get("azure_openai_dalle_api_key","open_ai_api_key")
             headers = {"api-key": api_key, "Content-Type": "application/json"}
             try:
-                body = {"prompt": query, "size": conf().get("image_create_size", "256x256"),"n": 1}
+                body = {"prompt": clean_query, "size": conf().get("image_create_size", "256x256"), "n": image_n}
                 submission = requests.post(url, headers=headers, json=body)
                 operation_location = submission.headers['operation-location']
                 status = ""
@@ -216,7 +217,7 @@ class AzureChatGPTBot(ChatGPTBot):
             api_key = conf().get("azure_openai_dalle_api_key","open_ai_api_key")
             headers = {"api-key": api_key, "Content-Type": "application/json"}
             try:
-                body = {"prompt": query, "size": conf().get("image_create_size", "1024x1024"), "quality": conf().get("dalle3_image_quality", "standard")}
+                body = {"prompt": clean_query, "size": conf().get("image_create_size", "1024x1024"), "quality": conf().get("dalle3_image_quality", "standard")}
                 response = requests.post(url, headers=headers, json=body)
                 response.raise_for_status()  # 检查请求是否成功
                 data = response.json()

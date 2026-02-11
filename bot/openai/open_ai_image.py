@@ -22,11 +22,12 @@ class OpenAIImage(object):
                 return False, "请求太快了，请休息一下再问我吧"
             if conf().get("image_create_use_chat_model"):
                 return self._create_img_by_chat_model(query=query, api_key=api_key, api_base=api_base)
+            image_n, clean_query = utils.parse_image_n_from_prompt(query, default_n=1, min_n=1, max_n=4)
             logger.info("[OPEN_AI] image_query={}".format(query))
             response = openai.Image.create(
                 api_key=api_key,
-                prompt=query,  # 图片描述
-                n=1,  # 每次生成图片的数量
+                prompt=clean_query,  # 图片描述
+                n=image_n,  # 每次生成图片的数量（支持从提示词 n=x 解析）
                 model=conf().get("text_to_image") or "dall-e-2",
                 # size=conf().get("image_create_size", "256x256"),  # 图片大小,可选有 256x256, 512x512, 1024x1024
             )
@@ -95,12 +96,13 @@ class OpenAIImage(object):
         return unique_sources
 
     def _create_img_by_chat_model(self, query, api_key=None, api_base=None):
+        _, clean_query = utils.parse_image_n_from_prompt(query, default_n=1, min_n=1, max_n=4)
         prefix = (
             "请不要输出任何解释或额外文本，只返回图片结果。"
             "你可以返回一张或多张图片。"
             "图片结果格式可为 Markdown 图片、HTML img、直接 URL，或 data:image/...;base64 数据。"
         )
-        prompt = f"{prefix}\n\n{(query or '').strip()}"
+        prompt = f"{prefix}\n\n{(clean_query or '').strip()}"
         logger.info("[OPEN_AI] image_query(chatmodel)={}".format(query))
 
         old_api_base = openai.api_base

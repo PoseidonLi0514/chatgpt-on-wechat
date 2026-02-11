@@ -53,6 +53,34 @@ def split_string_by_utf8_length(string, max_length, max_split=0):
     return result
 
 
+def parse_image_n_from_prompt(prompt: str, default_n=1, min_n=1, max_n=4):
+    """
+    从提示词中提取图片数量参数，严格匹配独立 token：n=数字（不支持 n = 1）。
+    - 允许范围：min_n ~ max_n
+    - 超出范围时回退 default_n
+    - 返回: (image_n, cleaned_prompt)
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return default_n, text
+
+    # 严格匹配独立参数 token，例如 "... n=3 ..."
+    # 不会匹配 "n = 3"、"abc_n=3" 这类形式
+    match = re.search(r"(?<!\S)n=(\d+)(?!\S)", text)
+    if not match:
+        return default_n, text
+
+    try:
+        raw_n = int(match.group(1))
+    except Exception:
+        raw_n = default_n
+
+    image_n = raw_n if min_n <= raw_n <= max_n else default_n
+    cleaned = (text[:match.start()] + " " + text[match.end():]).strip()
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return image_n, cleaned
+
+
 def get_path_suffix(path):
     path = urlparse(path).path
     return os.path.splitext(path)[-1].lstrip('.')

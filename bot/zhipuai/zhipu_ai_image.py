@@ -1,4 +1,5 @@
 from common.log import logger
+from common import utils
 from config import conf
 
 
@@ -13,10 +14,11 @@ class ZhipuAIImage(object):
         try:
             if conf().get("rate_limit_dalle"):
                 return False, "请求太快了，请休息一下再问我吧"
+            image_n, clean_query = utils.parse_image_n_from_prompt(query, default_n=1, min_n=1, max_n=4)
             logger.info("[ZHIPU_AI] image_query={}".format(query))
             response = self.client.images.generations(
-                prompt=query,
-                n=1,  # 每次生成图片的数量
+                prompt=clean_query,
+                n=image_n,  # 每次生成图片的数量（支持从提示词 n=x 解析）
                 model=conf().get("text_to_image") or "cogview-3",
                 size=conf().get("image_create_size", "1024x1024"),  # 图片大小,可选有 256x256, 512x512, 1024x1024
                 quality="standard",

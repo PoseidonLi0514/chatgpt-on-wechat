@@ -9,6 +9,7 @@ from bot.session_manager import SessionManager
 from bridge.context import ContextType
 from bridge.reply import Reply, ReplyType
 from common.log import logger
+from common import utils
 from config import conf, load_config
 from .modelscope_session import ModelScopeSession
 import requests
@@ -249,14 +250,15 @@ class ModelScopeBot(Bot):
                 return result
     def create_img(self, query, retry_count=0):
         try:
+            image_n, clean_query = utils.parse_image_n_from_prompt(query, default_n=1, min_n=1, max_n=4)
             logger.info("[ModelScopeImage] image_query={}".format(query))
             headers = {
                 "Content-Type": "application/json; charset=utf-8",  # 明确指定编码
                 "Authorization": f"Bearer {self.api_key}"
             }
             payload = {
-                "prompt": query,  # required
-                "n": 1,
+                "prompt": clean_query,  # required
+                "n": image_n,
                 "model": conf().get("text_to_image"),
             }
             url = "https://api-inference.modelscope.cn/v1/images/generations"

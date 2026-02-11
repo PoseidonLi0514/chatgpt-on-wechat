@@ -314,14 +314,15 @@ class LinkAIBot(Bot):
 
     def create_img(self, query, retry_count=0, api_key=None):
         try:
+            image_n, clean_query = utils.parse_image_n_from_prompt(query, default_n=1, min_n=1, max_n=4)
             logger.info("[LinkImage] image_query={}".format(query))
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {conf().get('linkai_api_key')}"
             }
             data = {
-                "prompt": query,
-                "n": 1,
+                "prompt": clean_query,
+                "n": image_n,
                 "model": conf().get("text_to_image") or "dall-e-2",
                 "response_format": "url",
                 "img_proxy": conf().get("image_proxy")
