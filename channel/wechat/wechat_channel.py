@@ -7,15 +7,20 @@ wechat channel
 import io
 import json
 import os
+import re
 import threading
 import time
 import requests
+import openai
+import openai.error
 
 from bridge.context import *
 from bridge.reply import *
+from bridge.bridge import Bridge
 from channel.chat_channel import ChatChannel
 from channel import chat_channel
 from channel.wechat.wechat_message import *
+from common import const, utils
 from common.expired_dict import ExpiredDict
 from common.log import logger
 from common.singleton import singleton
@@ -137,6 +142,13 @@ def qrCallback(uuid, status, qrcode):
 @singleton
 class WechatChannel(ChatChannel):
     NOT_SUPPORT_REPLYTYPE = []
+    NSFW_WARNING_TEXT = "侦测到NSFW内容，将会在一分钟后撤回消息"
+    NSFW_SYSTEM_PROMPT = (
+        "你是图像生成内容审核器。"
+        "请判断用户给出的图像提示词是否包含NSFW内容。"
+        "NSFW包括但不限于：露骨性行为、裸露生殖器/乳头、色情描写、未成年人性相关内容。"
+        "只输出严格JSON，不要输出其它字符：{\"nsfw\": true} 或 {\"nsfw\": false}。"
+    )
 
     def __init__(self):
         super().__init__()
@@ -255,19 +267,256 @@ class WechatChannel(ChatChannel):
         if context:
             self.produce(context)
 
+    def _handle(self, context: Context):
+        if context is None or not context.content:
+            return
+        if context.type == ContextType.IMAGE_CREATE:
+            self._handle_image_create_with_nsfw(context)
+            return
+        return super()._handle(context)
+
+    def _handle_image_create_with_nsfw(self, context: Context):
+        logger.debug("[WX] start image_create with nsfw check, prompt={}".format(context.content))
+        detect_future = chat_channel.handler_pool.submit(
+            self._detect_nsfw_for_image_prompt, context.content, context
+        )
+
+        reply = self._generate_reply(context)
+        logger.debug("[WX] image_create reply generated: {}".format(reply))
+        if not reply or not reply.content:
+            return
+
+        reply = self._decorate_reply(context, reply)
+        if not reply or not reply.type:
+            return
+
+        # 只针对实际图片回复走告警+撤回逻辑，错误文本等按原流程直接发送
+        if reply.type not in [ReplyType.IMAGE_URL, ReplyType.IMAGE]:
+            self._send_reply(context, reply)
+            return
+
+        is_nsfw = False
+        try:
+            is_nsfw = bool(detect_future.result(timeout=45))
+        except Exception as e:
+            logger.warning("[WX] nsfw check failed or timeout, ignore check: {}".format(e))
+            is_nsfw = False
+
+        if not is_nsfw:
+            self._send_reply(context, reply)
+            return
+
+        warning_reply = Reply(ReplyType.TEXT, self.NSFW_WARNING_TEXT)
+        warning_meta = self._send_and_collect_wx_messages(context, warning_reply, use_send_reply=False)
+        image_meta = self._send_and_collect_wx_messages(context, reply, use_send_reply=True)
+        revoke_meta = warning_meta + image_meta
+        if revoke_meta:
+            self._schedule_wx_revoke(revoke_meta, delay_seconds=60)
+
+    def _send_and_collect_wx_messages(self, context: Context, reply: Reply, use_send_reply=False):
+        sent_meta = context.kwargs.setdefault("_wx_sent_msg_meta", [])
+        start = len(sent_meta)
+        if use_send_reply:
+            self._send_reply(context, reply)
+        else:
+            self._send(reply, context)
+        return sent_meta[start:]
+
+    def _schedule_wx_revoke(self, msg_meta_list, delay_seconds=60):
+        # 按 msg_id + to_user 去重
+        unique_meta = []
+        dedup = set()
+        for item in msg_meta_list:
+            msg_id = str(item.get("msg_id") or "")
+            to_user = str(item.get("to_user") or "")
+            key = "{}::{}".format(msg_id, to_user)
+            if not msg_id or not to_user or key in dedup:
+                continue
+            dedup.add(key)
+            unique_meta.append({"msg_id": msg_id, "to_user": to_user})
+
+        if not unique_meta:
+            return
+
+        def _revoke_worker():
+            time.sleep(delay_seconds)
+            for item in unique_meta:
+                msg_id = item["msg_id"]
+                to_user = item["to_user"]
+                try:
+                    ret = itchat.revoke(msg_id, to_user)
+                    if ret:
+                        logger.info("[WX] revoke success, msg_id={}, to_user={}".format(msg_id, to_user))
+                    else:
+                        logger.warning("[WX] revoke failed, msg_id={}, to_user={}, ret={}".format(msg_id, to_user, ret))
+                except Exception as e:
+                    logger.warning("[WX] revoke exception, msg_id={}, to_user={}, err={}".format(msg_id, to_user, e))
+
+        thread = threading.Thread(target=_revoke_worker, daemon=True)
+        thread.start()
+
+    def _detect_nsfw_for_image_prompt(self, prompt: str, context: Context) -> bool:
+        _, clean_prompt = utils.parse_image_n_from_prompt(prompt, default_n=1, min_n=1, max_n=4)
+        clean_prompt = (clean_prompt or "").strip()
+        if not clean_prompt:
+            return False
+        raw_result = self._request_nsfw_result(clean_prompt, context)
+        nsfw = self._parse_nsfw_flag(raw_result)
+        logger.info("[WX] nsfw check done, nsfw={}, prompt={}, result={}".format(nsfw, clean_prompt, (raw_result or "")[:200]))
+        return nsfw
+
+    def _request_nsfw_result(self, clean_prompt: str, context: Context) -> str:
+        btype = Bridge().get_bot_type("chat")
+        if btype in [const.CHATGPT, const.OPEN_AI, const.CHATGPTONAZURE]:
+            result = self._request_nsfw_by_openai(clean_prompt, context, btype)
+            if result:
+                return result
+        return self._request_nsfw_by_bridge(clean_prompt, context)
+
+    def _request_nsfw_by_openai(self, clean_prompt: str, context: Context, bot_type: str) -> str:
+        messages = [
+            {"role": "system", "content": self.NSFW_SYSTEM_PROMPT},
+            {"role": "user", "content": clean_prompt},
+        ]
+        old_api_key = getattr(openai, "api_key", None)
+        old_api_base = getattr(openai, "api_base", None)
+        old_api_type = getattr(openai, "api_type", None)
+        old_api_version = getattr(openai, "api_version", None)
+        try:
+            openai.api_key = context.get("openai_api_key") or conf().get("open_ai_api_key")
+            if conf().get("open_ai_api_base"):
+                openai.api_base = conf().get("open_ai_api_base")
+
+            req_kwargs = {
+                "api_key": context.get("openai_api_key") or conf().get("open_ai_api_key"),
+                "messages": messages,
+                "request_timeout": conf().get("request_timeout", 60),
+                "timeout": conf().get("request_timeout", 60),
+            }
+            if bot_type == const.CHATGPTONAZURE:
+                openai.api_type = "azure"
+                openai.api_version = conf().get("azure_api_version", "2023-06-01-preview")
+                deployment_id = conf().get("azure_deployment_id")
+                if deployment_id:
+                    req_kwargs["deployment_id"] = deployment_id
+                else:
+                    req_kwargs["model"] = conf().get("model") or "gpt-3.5-turbo"
+            else:
+                openai.api_type = "open_ai"
+                req_kwargs["model"] = context.get("gpt_model") or conf().get("model") or "gpt-3.5-turbo"
+
+            response = openai.ChatCompletion.create(**req_kwargs)
+            return (response.choices[0]["message"]["content"] or "").strip()
+        except Exception as e:
+            logger.warning("[WX] nsfw openai check failed, fallback to bot reply: {}".format(e))
+            return ""
+        finally:
+            openai.api_key = old_api_key
+            openai.api_base = old_api_base
+            openai.api_type = old_api_type
+            openai.api_version = old_api_version
+
+    def _request_nsfw_by_bridge(self, clean_prompt: str, context: Context) -> str:
+        # 回退方案：仍使用当前 chat bot，但以独立 session 发起判断请求，避免污染用户主会话
+        nsfw_query = (
+            "请只输出严格JSON，不要输出任何其它字符："
+            "{\"nsfw\": true} 或 {\"nsfw\": false}。\n"
+            "判断下述图像提示词是否属于NSFW（色情、裸露、露骨性行为、未成年人性相关）：\n"
+            f"{clean_prompt}"
+        )
+        nsfw_ctx = Context(ContextType.TEXT, nsfw_query)
+        nsfw_session_id = "nsfw-check-{}-{}".format(context.get("session_id"), int(time.time() * 1000))
+        nsfw_ctx["session_id"] = nsfw_session_id
+        nsfw_ctx["receiver"] = context.get("receiver")
+        nsfw_ctx["isgroup"] = context.get("isgroup", False)
+        nsfw_ctx["openai_api_key"] = context.get("openai_api_key")
+        nsfw_ctx["gpt_model"] = context.get("gpt_model")
+
+        try:
+            reply = Bridge().fetch_reply_content(nsfw_query, nsfw_ctx)
+            if reply and reply.content:
+                return str(reply.content).strip()
+            return ""
+        except Exception as e:
+            logger.warning("[WX] nsfw bridge check failed: {}".format(e))
+            return ""
+        finally:
+            try:
+                bot = Bridge().get_bot("chat")
+                if hasattr(bot, "sessions"):
+                    bot.sessions.clear_session(nsfw_session_id)
+            except Exception:
+                pass
+
+    def _parse_nsfw_flag(self, result_text: str) -> bool:
+        text = (result_text or "").strip()
+        if not text:
+            return False
+
+        candidates = [text]
+        json_match = re.search(r"\{[\s\S]*\}", text)
+        if json_match:
+            candidates.insert(0, json_match.group(0))
+
+        for candidate in candidates:
+            try:
+                obj = json.loads(candidate)
+                if isinstance(obj, dict):
+                    value = obj.get("nsfw")
+                    if isinstance(value, bool):
+                        return value
+                    if isinstance(value, str):
+                        val = value.strip().lower()
+                        if val == "true":
+                            return True
+                        if val == "false":
+                            return False
+            except Exception:
+                continue
+
+        lowered = text.lower()
+        if re.search(r'"?nsfw"?\s*[:=]\s*true', lowered):
+            return True
+        if re.search(r'"?nsfw"?\s*[:=]\s*false', lowered):
+            return False
+        if lowered in ["true", "false"]:
+            return lowered == "true"
+        return False
+
+    def _extract_wx_msg_id(self, send_result):
+        if not isinstance(send_result, dict):
+            return None
+        for key in ["MsgID", "MsgId", "msg_id", "msgId", "SvrMsgId", "NewMsgId"]:
+            value = send_result.get(key)
+            if value:
+                return str(value)
+        return None
+
+    def _record_wx_sent_msg(self, context: Context, receiver: str, reply_type: ReplyType, send_result):
+        msg_id = self._extract_wx_msg_id(send_result)
+        if not msg_id:
+            return
+        sent_meta = context.kwargs.setdefault("_wx_sent_msg_meta", [])
+        sent_meta.append({
+            "msg_id": msg_id,
+            "to_user": receiver,
+            "reply_type": str(reply_type),
+        })
+
     # 统一的发送函数，每个Channel自行实现，根据reply的type字段发送不同类型的消息
     def send(self, reply: Reply, context: Context):
         receiver = context["receiver"]
+        send_result = None
         if reply.type == ReplyType.TEXT:
             reply.content = remove_markdown_symbol(reply.content)
-            itchat.send(reply.content, toUserName=receiver)
+            send_result = itchat.send(reply.content, toUserName=receiver)
             logger.info("[WX] sendMsg={}, receiver={}".format(reply, receiver))
         elif reply.type == ReplyType.ERROR or reply.type == ReplyType.INFO:
             reply.content = remove_markdown_symbol(reply.content)
-            itchat.send(reply.content, toUserName=receiver)
+            send_result = itchat.send(reply.content, toUserName=receiver)
             logger.info("[WX] sendMsg={}, receiver={}".format(reply, receiver))
         elif reply.type == ReplyType.VOICE:
-            itchat.send_file(reply.content, toUserName=receiver)
+            send_result = itchat.send_file(reply.content, toUserName=receiver)
             logger.info("[WX] sendFile={}, receiver={}".format(reply.content, receiver))
         elif reply.type == ReplyType.IMAGE_URL:  # 从网络下载图片
             img_url = reply.content
@@ -286,20 +535,20 @@ class WechatChannel(ChatChannel):
                 except Exception as e:
                     logger.error(f"Failed to convert image: {e}")
                     return
-            itchat.send_image(image_storage, toUserName=receiver)
+            send_result = itchat.send_image(image_storage, toUserName=receiver)
             logger.info("[WX] sendImage url={}, receiver={}".format(img_url, receiver))
         elif reply.type == ReplyType.IMAGE:  # 从文件读取图片
             image_storage = reply.content
             image_storage.seek(0)
-            itchat.send_image(image_storage, toUserName=receiver)
+            send_result = itchat.send_image(image_storage, toUserName=receiver)
             logger.info("[WX] sendImage, receiver={}".format(receiver))
         elif reply.type == ReplyType.FILE:  # 新增文件回复类型
             file_storage = reply.content
-            itchat.send_file(file_storage, toUserName=receiver)
+            send_result = itchat.send_file(file_storage, toUserName=receiver)
             logger.info("[WX] sendFile, receiver={}".format(receiver))
         elif reply.type == ReplyType.VIDEO:  # 新增视频回复类型
             video_storage = reply.content
-            itchat.send_video(video_storage, toUserName=receiver)
+            send_result = itchat.send_video(video_storage, toUserName=receiver)
             logger.info("[WX] sendFile, receiver={}".format(receiver))
         elif reply.type == ReplyType.VIDEO_URL:  # 新增视频URL回复类型
             video_url = reply.content
@@ -312,8 +561,10 @@ class WechatChannel(ChatChannel):
                 video_storage.write(block)
             logger.info(f"[WX] download video success, size={size}, video_url={video_url}")
             video_storage.seek(0)
-            itchat.send_video(video_storage, toUserName=receiver)
+            send_result = itchat.send_video(video_storage, toUserName=receiver)
             logger.info("[WX] sendVideo url={}, receiver={}".format(video_url, receiver))
+        self._record_wx_sent_msg(context, receiver, reply.type, send_result)
+        return send_result
 
 def _send_login_success():
     try:
