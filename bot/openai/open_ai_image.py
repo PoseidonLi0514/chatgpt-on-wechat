@@ -46,7 +46,11 @@ class OpenAIImage(object):
             return False, "画图出现问题，请休息一下再问我吧"
 
     def _create_img_by_chat_model(self, query, api_key=None, api_base=None):
-        prefix = "请你不要输出任何多余的话，只按照以下prompt来进行绘图，比例自定，质量始终为high。输出结果只需要一个图片。"
+        prefix = (
+            "请不要输出任何解释或额外文本，只返回图片结果。"
+            "你可以返回一张或多张图片。"
+            "图片结果格式可为 Markdown 图片、HTML img、直接 URL，或 data:image/...;base64 数据。"
+        )
         prompt = f"{prefix}\n\n{(query or '').strip()}"
         logger.info("[OPEN_AI] image_query(chatmodel)={}".format(query))
 
@@ -62,10 +66,13 @@ class OpenAIImage(object):
                 timeout=conf().get("request_timeout", 180),
             )
             content = response.choices[0]["message"]["content"] or ""
-            image_urls = utils.extract_markdown_image_urls(content)
-            if image_urls:
-                logger.info("[OPEN_AI] image_url(chatmodel)={}".format(image_urls[0]))
-                return True, image_urls[0]
-            return False, "画图返回内容中未找到图片链接"
+            image_sources = utils.extract_image_sources(content)
+            if image_sources:
+                logger.info("[OPEN_AI] image_count(chatmodel)={}".format(len(image_sources)))
+                if len(image_sources) == 1:
+                    logger.info("[OPEN_AI] image_source(chatmodel)={}".format(image_sources[0][:200]))
+                    return True, image_sources[0]
+                return True, image_sources
+            return False, "画图返回内容中未识别到图片数据"
         finally:
             openai.api_base = old_api_base

@@ -1,5 +1,7 @@
 import os
 import re
+import io
+import base64
 import threading
 import time
 from asyncio import CancelledError
@@ -10,6 +12,7 @@ from bridge.reply import *
 from channel.channel import Channel
 from common.dequeue import Dequeue
 from common import memory
+from common import utils
 from plugins import *
 
 try:
@@ -282,6 +285,12 @@ class ChatChannel(Channel):
 
     def _send_reply(self, context: Context, reply: Reply):
         if reply and reply.type:
+            expanded_image_replies = self._expand_image_replies(reply)
+            if expanded_image_replies is not None:
+                for image_reply in expanded_image_replies:
+                    self._send_reply(context, image_reply)
+                return
+
             e_context = PluginManager().emit_event(
                 EventContext(
                     Event.ON_SEND_REPLY,
@@ -292,6 +301,68 @@ class ChatChannel(Channel):
             if not e_context.is_pass() and reply and reply.type:
                 logger.debug("[chat_channel] ready to send reply: {}, context: {}".format(reply, context))
                 self._send(reply, context)
+
+    def _expand_image_replies(self, reply: Reply):
+        """
+        支持多图拆分发送，并自动将 data-uri/base64 转成 IMAGE 回复。
+        返回 None 表示无需处理，返回 list[Reply] 表示需逐条发送。
+        """
+        if reply.type not in [ReplyType.IMAGE_URL, ReplyType.IMAGE]:
+            return None
+
+        if isinstance(reply.content, list):
+            raw_items = reply.content
+            force_expand = True
+        else:
+            raw_items = [reply.content]
+            force_expand = False
+
+        expanded = []
+        changed = force_expand
+
+        for item in raw_items:
+            if isinstance(item, Reply):
+                expanded.append(item)
+                changed = True
+                continue
+
+            current_reply = Reply(reply.type, item)
+            if reply.type == ReplyType.IMAGE_URL and isinstance(item, str):
+                converted = self._convert_image_url_to_reply(item)
+                if converted is not None:
+                    current_reply = converted
+                    if converted.type != ReplyType.IMAGE_URL or converted.content != item:
+                        changed = True
+
+            expanded.append(current_reply)
+
+        if not changed:
+            return None
+        return expanded
+
+    def _convert_image_url_to_reply(self, value: str):
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return Reply(ReplyType.IMAGE_URL, text)
+        if text.startswith("http://") or text.startswith("https://"):
+            return Reply(ReplyType.IMAGE_URL, text)
+
+        mime_type, image_bytes = utils.decode_base64_image(text)
+        if image_bytes is None:
+            return Reply(ReplyType.IMAGE_URL, text)
+
+        # 通道支持 IMAGE 时优先走二进制图片发送
+        if ReplyType.IMAGE not in self.NOT_SUPPORT_REPLYTYPE:
+            image_storage = io.BytesIO(image_bytes)
+            image_storage.seek(0)
+            return Reply(ReplyType.IMAGE, image_storage)
+
+        # 通道不支持 IMAGE 时退化为 data-uri 文本
+        b64_str = base64.b64encode(image_bytes).decode("utf-8")
+        mime_type = mime_type or "image/png"
+        return Reply(ReplyType.IMAGE_URL, f"data:{mime_type};base64,{b64_str}")
 
     def _send(self, reply: Reply, context: Context, retry_cnt=0):
         try:

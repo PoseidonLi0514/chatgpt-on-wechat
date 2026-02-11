@@ -7,6 +7,8 @@
 
 # -*- coding=utf-8 -*-
 import uuid
+import io
+import imghdr
 
 import requests
 import web
@@ -21,13 +23,14 @@ from bridge.context import ContextType
 from channel.chat_channel import ChatChannel, check_prefix
 from common import utils
 import json
-import os
 
 URL_VERIFICATION = "url_verification"
 
 
 @singleton
 class FeiShuChanel(ChatChannel):
+    NOT_SUPPORT_REPLYTYPE = [ReplyType.VOICE]
+
     feishu_app_id = conf().get('feishu_app_id')
     feishu_app_secret = conf().get('feishu_app_secret')
     feishu_token = conf().get('feishu_token')
@@ -67,7 +70,20 @@ class FeiShuChanel(ChatChannel):
         content_key = "text"
         if reply.type == ReplyType.IMAGE_URL:
             # 图片上传
-            reply_content = self._upload_image_url(reply.content, access_token)
+            if isinstance(reply.content, str) and reply.content.startswith("data:image/"):
+                _, image_bytes = utils.decode_base64_image(reply.content)
+                reply_content = self._upload_image_bytes(image_bytes, access_token) if image_bytes else None
+            else:
+                reply_content = self._upload_image_url(reply.content, access_token)
+            if not reply_content:
+                logger.warning("[FeiShu] upload file failed")
+                return
+            msg_type = "image"
+            content_key = "image_key"
+        elif reply.type == ReplyType.IMAGE:
+            image_storage = reply.content
+            image_storage.seek(0)
+            reply_content = self._upload_image_bytes(image_storage.read(), access_token)
             if not reply_content:
                 logger.warning("[FeiShu] upload file failed")
                 return
@@ -122,12 +138,17 @@ class FeiShuChanel(ChatChannel):
     def _upload_image_url(self, img_url, access_token):
         logger.debug(f"[WX] start download image, img_url={img_url}")
         response = requests.get(img_url)
-        suffix = utils.get_path_suffix(img_url)
-        temp_name = str(uuid.uuid4()) + "." + suffix
-        if response.status_code == 200:
-            # 将图片内容保存为临时文件
-            with open(temp_name, "wb") as file:
-                file.write(response.content)
+        if response.status_code != 200:
+            return None
+        suffix = utils.get_path_suffix(img_url) or "png"
+        return self._upload_image_bytes(response.content, access_token, suffix=suffix)
+
+    def _upload_image_bytes(self, image_bytes, access_token, suffix=None):
+        if not image_bytes:
+            return None
+
+        if not suffix:
+            suffix = imghdr.what(None, h=image_bytes) or "png"
 
         # upload
         upload_url = "https://open.feishu.cn/open-apis/im/v1/images"
@@ -137,11 +158,17 @@ class FeiShuChanel(ChatChannel):
         headers = {
             'Authorization': f'Bearer {access_token}',
         }
-        with open(temp_name, "rb") as file:
-            upload_response = requests.post(upload_url, files={"image": file}, data=data, headers=headers)
-            logger.info(f"[FeiShu] upload file, res={upload_response.content}")
-            os.remove(temp_name)
-            return upload_response.json().get("data").get("image_key")
+        filename = f"{uuid.uuid4()}.{suffix}"
+        content_type = f"image/{'jpeg' if suffix in ['jpg', 'jpeg'] else suffix}"
+        file_obj = io.BytesIO(image_bytes)
+        upload_response = requests.post(
+            upload_url,
+            files={"image": (filename, file_obj, content_type)},
+            data=data,
+            headers=headers
+        )
+        logger.info(f"[FeiShu] upload file, res={upload_response.content}")
+        return upload_response.json().get("data", {}).get("image_key")
 
 
 

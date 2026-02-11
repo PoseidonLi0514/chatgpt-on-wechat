@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import base64
 from urllib.parse import urlparse
 from PIL import Image
 from common.log import logger
@@ -99,6 +100,67 @@ def extract_markdown_image_urls(text: str):
     return extract_https_urls(text)
 
 
+def extract_image_sources(text: str):
+    """
+    提取文本中的图片来源，支持：
+    1) http/https 图片链接
+    2) data:image/...;base64,... 数据
+    3) 常见 JSON 字段中的 base64（如 b64_json/base64/image_base64）
+    """
+    if not text:
+        return []
+
+    sources = []
+
+    def _append_if_image_source(raw: str):
+        if not raw:
+            return
+        item = raw.strip()
+        if item.startswith("<") and ">" in item:
+            item = item[1:item.index(">")].strip()
+        item = item.strip().strip('"').strip("'")
+        if _is_http_url(item):
+            sources.append(item)
+            return
+        if _is_data_image_url(item):
+            sources.append(_normalize_data_image_url(item))
+
+    # Markdown 图片语法
+    for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", text):
+        inside = match.group(1).strip()
+        if inside.startswith("<") and ">" in inside:
+            inside = inside[1:inside.index(">")].strip()
+        else:
+            inside = inside.split()[0].strip().strip('"').strip("'")
+        _append_if_image_source(inside)
+
+    # HTML img 标签
+    for match in re.finditer(r"<img[^>]+src=[\"']([^\"']+)[\"'][^>]*>", text, flags=re.IGNORECASE):
+        _append_if_image_source(match.group(1).strip())
+
+    # 文本中直接出现 data:image
+    data_uri_pattern = r"data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+"
+    for match in re.finditer(data_uri_pattern, text, flags=re.IGNORECASE):
+        _append_if_image_source(match.group(0))
+
+    # 常见 JSON base64 字段
+    for key in ["b64_json", "base64", "image_base64"]:
+        pattern = rf"\"{key}\"\s*:\s*\"([A-Za-z0-9+/=\s]+)\""
+        for match in re.finditer(pattern, text):
+            b64_payload = re.sub(r"\s+", "", match.group(1))
+            if b64_payload:
+                sources.append(f"data:image/png;base64,{b64_payload}")
+
+    # 补充提取纯文本中的 URL（与 markdown/html 混合时也能识别）
+    sources.extend(extract_https_urls(text))
+
+    # 回退：尝试提取 http/https URL
+    if not sources:
+        return []
+
+    return _unique_keep_order(sources)
+
+
 def extract_https_urls(text: str):
     if not text:
         return []
@@ -120,3 +182,62 @@ def _unique_keep_order(items):
         seen.add(item)
         result.append(item)
     return result
+
+
+def decode_base64_image(data: str):
+    """
+    解析 data:image 或裸 base64 图片字符串，返回 (mime_type, bytes)。
+    解析失败返回 (None, None)。
+    """
+    if not data or not isinstance(data, str):
+        return None, None
+
+    raw = data.strip().strip('"').strip("'")
+    mime_type = "image/png"
+    payload = raw
+
+    if _is_data_image_url(raw):
+        header, payload = raw.split(",", 1)
+        mime_match = re.match(r"^data:(image\/[a-zA-Z0-9.+-]+);base64$", header.strip(), re.IGNORECASE)
+        if mime_match:
+            mime_type = mime_match.group(1).lower()
+    elif raw.lower().startswith("base64,"):
+        payload = raw.split(",", 1)[1]
+    else:
+        # 裸 base64 做严格字符判断，避免误判普通文本
+        if not re.fullmatch(r"[A-Za-z0-9+/=_\-\s]+", raw):
+            return None, None
+        if len(re.sub(r"\s+", "", raw)) < 64:
+            return None, None
+
+    payload = re.sub(r"\s+", "", payload)
+    if not payload:
+        return None, None
+
+    # base64 padding 补齐
+    payload += "=" * (-len(payload) % 4)
+    try:
+        return mime_type, base64.b64decode(payload, validate=False)
+    except Exception:
+        try:
+            return mime_type, base64.urlsafe_b64decode(payload)
+        except Exception:
+            return None, None
+
+
+def _is_http_url(url: str):
+    return isinstance(url, str) and (url.startswith("http://") or url.startswith("https://"))
+
+
+def _is_data_image_url(url: str):
+    if not isinstance(url, str):
+        return False
+    return bool(re.match(r"^data:image\/[a-zA-Z0-9.+-]+;base64,", url.strip(), re.IGNORECASE))
+
+
+def _normalize_data_image_url(url: str):
+    if not _is_data_image_url(url):
+        return url
+    header, payload = url.split(",", 1)
+    payload = re.sub(r"\s+", "", payload)
+    return f"{header},{payload}"

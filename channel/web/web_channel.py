@@ -3,6 +3,8 @@ import time
 import web
 import json
 import uuid
+import imghdr
+import base64
 from queue import Queue, Empty
 from bridge.context import *
 from bridge.reply import Reply, ReplyType
@@ -86,10 +88,23 @@ class WebChannel(ChatChannel):
             
             # 检查是否有会话队列
             if session_id in self.session_queues:
+                reply_content = reply.content
+                if reply.type == ReplyType.IMAGE:
+                    # Web 侧通过 markdown 展示 data-uri 图片
+                    image_storage = reply.content
+                    image_storage.seek(0)
+                    image_bytes = image_storage.read()
+                    image_type = imghdr.what(None, h=image_bytes) or "png"
+                    data_uri = f"data:image/{image_type};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+                    reply_content = f"![image]({data_uri})"
+                elif reply.type == ReplyType.IMAGE_URL and isinstance(reply.content, str) and reply.content.startswith("data:image/"):
+                    # data-uri 直接包成 markdown 图片，前端可渲染
+                    reply_content = f"![image]({reply.content})"
+
                 # 创建响应数据，包含请求ID以区分不同请求的响应
                 response_data = {
                     "type": str(reply.type),
-                    "content": reply.content,
+                    "content": reply_content,
                     "timestamp": time.time(),
                     "request_id": request_id
                 }
