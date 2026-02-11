@@ -30,9 +30,14 @@ class OpenAIImage(object):
                 model=conf().get("text_to_image") or "dall-e-2",
                 # size=conf().get("image_create_size", "256x256"),  # 图片大小,可选有 256x256, 512x512, 1024x1024
             )
-            image_url = response["data"][0]["url"]
-            logger.info("[OPEN_AI] image_url={}".format(image_url))
-            return True, image_url
+            image_sources = self._extract_image_sources_from_generation_response(response)
+            if not image_sources:
+                return False, "画图返回内容中未识别到图片数据"
+            logger.info("[OPEN_AI] image_count={}".format(len(image_sources)))
+            if len(image_sources) == 1:
+                logger.info("[OPEN_AI] image_source={}".format(image_sources[0][:200]))
+                return True, image_sources[0]
+            return True, image_sources
         except openai.error.RateLimitError as e:
             logger.warn(e)
             if retry_count < 1:
@@ -44,6 +49,50 @@ class OpenAIImage(object):
         except Exception as e:
             logger.exception(e)
             return False, "画图出现问题，请休息一下再问我吧"
+
+    def _extract_image_sources_from_generation_response(self, response):
+        def _safe_get(obj, key):
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return obj.get(key)
+            try:
+                return obj.get(key)
+            except Exception:
+                return getattr(obj, key, None)
+
+        data_list = _safe_get(response, "data")
+        if not isinstance(data_list, list):
+            return []
+
+        sources = []
+        for item in data_list:
+            url = _safe_get(item, "url")
+            if isinstance(url, str):
+                source = url.strip()
+                if source:
+                    sources.append(source)
+
+            b64_json = _safe_get(item, "b64_json")
+            if isinstance(b64_json, str):
+                b64_payload = "".join(b64_json.split())
+                if b64_payload:
+                    sources.append(f"data:image/png;base64,{b64_payload}")
+
+            base64_image = _safe_get(item, "base64")
+            if isinstance(base64_image, str):
+                b64_payload = "".join(base64_image.split())
+                if b64_payload:
+                    sources.append(f"data:image/png;base64,{b64_payload}")
+
+        unique_sources = []
+        seen = set()
+        for source in sources:
+            if source in seen:
+                continue
+            seen.add(source)
+            unique_sources.append(source)
+        return unique_sources
 
     def _create_img_by_chat_model(self, query, api_key=None, api_base=None):
         prefix = (
