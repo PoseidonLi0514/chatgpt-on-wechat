@@ -351,6 +351,8 @@ class ChatChannel(Channel):
 
         mime_type, image_bytes = utils.decode_base64_image(text)
         if image_bytes is None:
+            if text.lower().startswith("data:image/"):
+                return Reply(ReplyType.ERROR, "图片数据无效，发送失败")
             return Reply(ReplyType.IMAGE_URL, text)
 
         # 通道支持 IMAGE 时优先走二进制图片发送

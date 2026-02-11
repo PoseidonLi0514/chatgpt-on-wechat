@@ -143,6 +143,8 @@ def qrCallback(uuid, status, qrcode):
 class WechatChannel(ChatChannel):
     NOT_SUPPORT_REPLYTYPE = []
     NSFW_WARNING_TEXT = "侦测到NSFW内容，将会在一分钟后撤回消息"
+    NSFW_RETRY_CHECKPOINTS = [0, 5, 10, 20, 25, 30, 40, 45, 50, 55, 60]  # 3 + 3 + 5 = 11次
+    NSFW_ATTEMPT_TIMEOUT_SECONDS = 5
     NSFW_SYSTEM_PROMPT = (
         "你是图像生成内容审核器。"
         "请判断用户给出的图像提示词是否包含NSFW内容。"
@@ -278,7 +280,7 @@ class WechatChannel(ChatChannel):
     def _handle_image_create_with_nsfw(self, context: Context):
         logger.debug("[WX] start image_create with nsfw check, prompt={}".format(context.content))
         detect_future = chat_channel.handler_pool.submit(
-            self._detect_nsfw_for_image_prompt, context.content, context
+            self._detect_nsfw_for_image_prompt_with_retry, context.content, context
         )
 
         reply = self._generate_reply(context)
@@ -295,20 +297,35 @@ class WechatChannel(ChatChannel):
             self._send_reply(context, reply)
             return
 
-        is_nsfw = False
-        try:
-            is_nsfw = bool(detect_future.result(timeout=45))
-        except Exception as e:
-            logger.warning("[WX] nsfw check failed or timeout, ignore check: {}".format(e))
-            is_nsfw = False
+        # 先发送图片，随后根据审核结果决定是否撤回
+        image_meta = self._send_and_collect_wx_messages(context, reply, use_send_reply=True)
 
-        if not is_nsfw:
-            self._send_reply(context, reply)
+        detect_result = None
+        try:
+            detect_result = detect_future.result(timeout=70)
+        except Exception as e:
+            logger.warning("[WX] nsfw check failed with exception, conservative revoke images: {}".format(e))
+            if image_meta:
+                self._schedule_wx_revoke(image_meta, delay_seconds=1)
+            return
+
+        if not isinstance(detect_result, dict):
+            logger.warning("[WX] nsfw check invalid result, conservative revoke images")
+            if image_meta:
+                self._schedule_wx_revoke(image_meta, delay_seconds=1)
+            return
+
+        if detect_result.get("status") == "failed":
+            logger.warning("[WX] nsfw check all attempts failed, conservative revoke images")
+            if image_meta:
+                self._schedule_wx_revoke(image_meta, delay_seconds=1)
+            return
+
+        if not detect_result.get("nsfw", False):
             return
 
         warning_reply = Reply(ReplyType.TEXT, self.NSFW_WARNING_TEXT)
         warning_meta = self._send_and_collect_wx_messages(context, warning_reply, use_send_reply=False)
-        image_meta = self._send_and_collect_wx_messages(context, reply, use_send_reply=True)
         revoke_meta = warning_meta + image_meta
         if revoke_meta:
             self._schedule_wx_revoke(revoke_meta, delay_seconds=60)
@@ -355,15 +372,36 @@ class WechatChannel(ChatChannel):
         thread = threading.Thread(target=_revoke_worker, daemon=True)
         thread.start()
 
-    def _detect_nsfw_for_image_prompt(self, prompt: str, context: Context) -> bool:
+    def _detect_nsfw_for_image_prompt_with_retry(self, prompt: str, context: Context) -> dict:
         _, clean_prompt = utils.parse_image_n_from_prompt(prompt, default_n=1, min_n=1, max_n=4)
         clean_prompt = (clean_prompt or "").strip()
         if not clean_prompt:
-            return False
-        raw_result = self._request_nsfw_result(clean_prompt, context)
-        nsfw = self._parse_nsfw_flag(raw_result)
-        logger.info("[WX] nsfw check done, nsfw={}, prompt={}, result={}".format(nsfw, clean_prompt, (raw_result or "")[:200]))
-        return nsfw
+            return {"status": "ok", "nsfw": False, "attempts": 0}
+
+        start_ts = time.time()
+        for idx, checkpoint in enumerate(self.NSFW_RETRY_CHECKPOINTS, start=1):
+            target_ts = start_ts + checkpoint
+            wait_seconds = target_ts - time.time()
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+
+            raw_result = self._request_nsfw_result(clean_prompt, context)
+            nsfw = self._parse_nsfw_flag(raw_result)
+            if nsfw is not None:
+                logger.info(
+                    "[WX] nsfw check success, nsfw={}, attempts={}, prompt={}, result={}".format(
+                        nsfw, idx, clean_prompt, (raw_result or "")[:200]
+                    )
+                )
+                return {"status": "ok", "nsfw": nsfw, "attempts": idx}
+
+            logger.warning(
+                "[WX] nsfw check attempt {} failed, prompt={}, raw_result={}".format(
+                    idx, clean_prompt, (raw_result or "")[:200]
+                )
+            )
+
+        return {"status": "failed", "nsfw": None, "attempts": len(self.NSFW_RETRY_CHECKPOINTS)}
 
     def _request_nsfw_result(self, clean_prompt: str, context: Context) -> str:
         btype = Bridge().get_bot_type("chat")
@@ -390,8 +428,8 @@ class WechatChannel(ChatChannel):
             req_kwargs = {
                 "api_key": context.get("openai_api_key") or conf().get("open_ai_api_key"),
                 "messages": messages,
-                "request_timeout": conf().get("request_timeout", 60),
-                "timeout": conf().get("request_timeout", 60),
+                "request_timeout": min(conf().get("request_timeout", 60), self.NSFW_ATTEMPT_TIMEOUT_SECONDS),
+                "timeout": min(conf().get("request_timeout", 60), self.NSFW_ATTEMPT_TIMEOUT_SECONDS),
             }
             if bot_type == const.CHATGPTONAZURE:
                 openai.api_type = "azure"
@@ -448,10 +486,10 @@ class WechatChannel(ChatChannel):
             except Exception:
                 pass
 
-    def _parse_nsfw_flag(self, result_text: str) -> bool:
+    def _parse_nsfw_flag(self, result_text: str):
         text = (result_text or "").strip()
         if not text:
-            return False
+            return None
 
         candidates = [text]
         json_match = re.search(r"\{[\s\S]*\}", text)
@@ -481,7 +519,8 @@ class WechatChannel(ChatChannel):
             return False
         if lowered in ["true", "false"]:
             return lowered == "true"
-        return False
+        # 更严格策略：只要不是明确 false，其它非空返回一律按 NSFW 处理
+        return True
 
     def _extract_wx_msg_id(self, send_result):
         if not isinstance(send_result, dict):
@@ -520,6 +559,19 @@ class WechatChannel(ChatChannel):
             logger.info("[WX] sendFile={}, receiver={}".format(reply.content, receiver))
         elif reply.type == ReplyType.IMAGE_URL:  # 从网络下载图片
             img_url = reply.content
+            if isinstance(img_url, str) and img_url.startswith("data:image/"):
+                _, image_bytes = utils.decode_base64_image(img_url)
+                if image_bytes is None:
+                    logger.warning("[WX] invalid data-uri image, skip send")
+                    send_result = itchat.send("图片数据无效，发送失败", toUserName=receiver)
+                    self._record_wx_sent_msg(context, receiver, ReplyType.ERROR, send_result)
+                    return send_result
+                image_storage = io.BytesIO(image_bytes)
+                image_storage.seek(0)
+                send_result = itchat.send_image(image_storage, toUserName=receiver)
+                logger.info("[WX] sendImage data-uri, receiver={}".format(receiver))
+                self._record_wx_sent_msg(context, receiver, reply.type, send_result)
+                return send_result
             logger.debug(f"[WX] start download image, img_url={img_url}")
             pic_res = requests.get(img_url, stream=True)
             image_storage = io.BytesIO()

@@ -78,13 +78,23 @@ class OpenAIImage(object):
             if isinstance(b64_json, str):
                 b64_payload = "".join(b64_json.split())
                 if b64_payload:
-                    sources.append(f"data:image/png;base64,{b64_payload}")
+                    data_uri = f"data:image/png;base64,{b64_payload}"
+                    _, image_bytes = utils.decode_base64_image(data_uri)
+                    if image_bytes is not None:
+                        sources.append(data_uri)
+                    else:
+                        logger.warning("[OPEN_AI] invalid b64_json image payload skipped")
 
             base64_image = _safe_get(item, "base64")
             if isinstance(base64_image, str):
                 b64_payload = "".join(base64_image.split())
                 if b64_payload:
-                    sources.append(f"data:image/png;base64,{b64_payload}")
+                    data_uri = f"data:image/png;base64,{b64_payload}"
+                    _, image_bytes = utils.decode_base64_image(data_uri)
+                    if image_bytes is not None:
+                        sources.append(data_uri)
+                    else:
+                        logger.warning("[OPEN_AI] invalid base64 image payload skipped")
 
         unique_sources = []
         seen = set()

@@ -244,17 +244,34 @@ def decode_base64_image(data: str):
 
     # base64 padding 补齐
     payload += "=" * (-len(payload) % 4)
+    image_bytes = None
     try:
-        return mime_type, base64.b64decode(payload, validate=False)
+        image_bytes = base64.b64decode(payload, validate=True)
     except Exception:
         try:
-            return mime_type, base64.urlsafe_b64decode(payload)
+            image_bytes = base64.urlsafe_b64decode(payload)
         except Exception:
             return None, None
+
+    if not _is_valid_image_bytes(image_bytes):
+        return None, None
+    return mime_type, image_bytes
 
 
 def _is_http_url(url: str):
     return isinstance(url, str) and (url.startswith("http://") or url.startswith("https://"))
+
+
+def _is_valid_image_bytes(image_bytes: bytes):
+    if not image_bytes or len(image_bytes) < 16:
+        return False
+    try:
+        image_buffer = io.BytesIO(image_bytes)
+        with Image.open(image_buffer) as image:
+            image.verify()
+        return True
+    except Exception:
+        return False
 
 
 def _is_data_image_url(url: str):
